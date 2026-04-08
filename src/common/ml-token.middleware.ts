@@ -14,8 +14,11 @@ export class MlTokenMiddleware implements NestMiddleware {
   use(req: Request, _res: Response, next: NextFunction) {
     const token = req.headers['x-ml-token'] as string | undefined;
     if (token) {
+      console.log(`[MlTokenMiddleware] Token received: ${token.slice(0, 20)}...`);
       // 6 hours in seconds — standard ML token lifetime
       this.authService.setAccessToken(token, 21600);
+    } else {
+      console.log(`[MlTokenMiddleware] No x-ml-token header`);
     }
     next();
   }
