@@ -7,7 +7,7 @@ export default () => ({
     clientSecret: process.env.ML_CLIENT_SECRET,
     redirectUri: process.env.ML_REDIRECT_URI || 'http://localhost:3000/auth/callback',
     siteId: process.env.ML_SITE_ID || 'MLB',
-    authUrl: process.env.ML_AUTH_URL || 'https://auth.mercadolibre.com/authorization',
+    authUrl: process.env.ML_AUTH_URL || 'https://auth.mercadolivre.com.br/authorization',
     tokenUrl: process.env.ML_TOKEN_URL || 'https://api.mercadolibre.com/oauth/token',
     apiBase: process.env.ML_API_BASE || 'https://api.mercadolibre.com',
   },
