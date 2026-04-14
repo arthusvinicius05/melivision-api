@@ -138,22 +138,96 @@ export class SearchController {
     @Query('offset') offset?: number,
     @Query('search_type') searchType?: string,
   ) {
-    const params: any = {};
-
+    // ML restricted /sites/{site}/search in April 2025. Use /products/search
+    // (catalog) and enrich each result with the buy-box-winning marketplace
+    // item to recover price/seller/condition. Output shape matches the legacy
+    // /sites/{site}/search response so downstream consumers don't change.
+    const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 20);
+    const params: any = {
+      site_id: siteId,
+      status: 'active',
+      limit: requestedLimit,
+    };
     if (q) params.q = q;
-    if (category) params.category = category;
-    if (sellerId) params.seller_id = sellerId;
-    if (officialStoreId) params.official_store_id = officialStoreId;
-    if (priceMin) params.price_min = priceMin;
-    if (priceMax) params.price_max = priceMax;
-    if (shipping) params.shipping = shipping;
-    if (condition) params.condition = condition;
-    if (sort) params.sort = sort;
-    if (limit) params.limit = limit;
+    if (category) params.domain_id = category;
     if (offset !== undefined) params.offset = offset;
-    if (searchType) params.search_type = searchType;
 
-    return this.mlService.get(`/sites/${siteId}/search`, params);
+    const catalog = await this.mlService.get<any>('/products/search', params);
+
+    const results = await Promise.all(
+      (catalog.results || []).map(async (product: any) => {
+        let item: any = null;
+        try {
+          const itemsRes = await this.mlService.get<any>(
+            `/products/${product.id}/items`,
+            { limit: 1 },
+          );
+          item = itemsRes?.results?.[0] || null;
+        } catch {
+          // No buy-box winner for this catalog product — return catalog-only row.
+        }
+
+        const thumbnail =
+          product.pictures?.[0]?.url ||
+          product.pictures?.[0]?.secure_url ||
+          undefined;
+
+        return {
+          id: item?.item_id || product.id,
+          catalog_product_id: product.id,
+          title: product.name,
+          price: item?.price,
+          original_price: item?.original_price,
+          currency_id: item?.currency_id,
+          condition: item?.condition,
+          available_quantity: item?.available_quantity,
+          listing_type_id: item?.listing_type_id,
+          domain_id: product.domain_id,
+          thumbnail,
+          permalink: item?.permalink || product.permalink,
+          shipping: item?.shipping
+            ? {
+                free_shipping: item.shipping.free_shipping,
+                logistic_type: item.shipping.logistic_type,
+              }
+            : undefined,
+          seller: item?.seller_id ? { id: item.seller_id } : undefined,
+          attributes: (product.attributes || []).slice(0, 8).map((a: any) => ({
+            id: a.id,
+            name: a.name,
+            value_name: a.value_name,
+          })),
+        };
+      }),
+    );
+
+    // Apply client-side filters that /products/search doesn't support natively.
+    let filtered = results;
+    if (priceMin) filtered = filtered.filter((r) => r.price && r.price >= priceMin);
+    if (priceMax) filtered = filtered.filter((r) => r.price && r.price <= priceMax);
+    if (condition) filtered = filtered.filter((r) => r.condition === condition);
+    if (shipping === 'free') {
+      filtered = filtered.filter((r) => r.shipping?.free_shipping);
+    }
+    if (sort === 'price_asc') {
+      filtered.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity));
+    } else if (sort === 'price_desc') {
+      filtered.sort((a, b) => (b.price ?? -Infinity) - (a.price ?? -Infinity));
+    }
+
+    // sellerId / officialStoreId / searchType filters are no longer supported
+    // by /products/search; ignored for now. Catalog-search-based seller scoping
+    // would need a different flow (e.g. /users/{id}/items/search).
+    void sellerId;
+    void officialStoreId;
+    void searchType;
+
+    return {
+      site_id: siteId,
+      query: q,
+      paging: catalog.paging,
+      results: filtered,
+    };
   }
 
   @Get('sites/:siteId/search_suggestions')

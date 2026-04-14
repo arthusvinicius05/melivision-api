@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Controller, Get, HttpException, Param, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { MercadolibreService } from '../mercadolibre.service';
 
@@ -35,7 +35,60 @@ export class ItemsController {
     },
   })
   async getItem(@Param('itemId') itemId: string) {
-    return this.mlService.get(`/items/${itemId}`);
+    try {
+      return await this.mlService.get(`/items/${itemId}`);
+    } catch (error) {
+      // ML restricted /items/{id} in April 2025 — app-level tokens now get 403.
+      // Compose a best-effort public view from endpoints that still work with
+      // client_credentials so unauthenticated flows can still analyze items.
+      const status = error instanceof HttpException ? error.getStatus() : 500;
+      if (status !== 403) throw error;
+
+      const [description, reviews, questions] = await Promise.all([
+        this.mlService
+          .get<any>(`/items/${itemId}/description`)
+          .catch(() => null),
+        this.mlService
+          .get<any>(`/reviews/item/${itemId}`)
+          .catch(() => null),
+        this.mlService
+          .get<any>(`/questions/search`, { item_id: itemId })
+          .catch(() => null),
+      ]);
+
+      return {
+        id: itemId,
+        _partial: true,
+        _reason:
+          'ML restricts /items/{id} to user-authenticated requests. Data below is composed from still-public endpoints.',
+        description: description?.plain_text || description?.text || null,
+        reviews: reviews
+          ? {
+              rating_average: reviews.rating_average,
+              total: reviews.paging?.total,
+              sample: (reviews.reviews || [])
+                .slice(0, 5)
+                .map((r: any) => ({
+                  rate: r.rate,
+                  title: r.title,
+                  content: r.content,
+                })),
+            }
+          : null,
+        questions: questions
+          ? {
+              total: questions.total,
+              sample: (questions.questions || [])
+                .slice(0, 5)
+                .map((q: any) => ({
+                  text: q.text,
+                  status: q.status,
+                  answer_text: q.answer?.text,
+                })),
+            }
+          : null,
+      };
+    }
   }
 
   @Get(':itemId/description')

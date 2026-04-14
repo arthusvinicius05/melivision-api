@@ -11,6 +11,14 @@ export class AuthService {
   private refreshToken: string | null = null;
   private tokenExpiry: Date | null = null;
 
+  // App-level token from client_credentials grant. Used as a fallback when no
+  // user-level token has been forwarded for the current request. ML now requires
+  // a Bearer header on virtually every endpoint, so the fallback keeps public
+  // tools (catalog search, trends, item lookups) working before the user signs in.
+  private appAccessToken: string | null = null;
+  private appTokenExpiry: Date | null = null;
+  private appTokenInflight: Promise<string> | null = null;
+
   constructor(
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
@@ -178,6 +186,82 @@ export class AuthService {
    */
   isAuthenticated(): boolean {
     return !!this.accessToken;
+  }
+
+  /**
+   * Returns a Bearer token usable for requests that don't need a specific user
+   * identity. Prefers the per-request user token (set by MlTokenMiddleware);
+   * falls back to a cached client_credentials app token.
+   */
+  async getBearerToken(): Promise<string> {
+    if (this.accessToken) {
+      if (!this.tokenExpiry || new Date() < this.tokenExpiry) {
+        return this.accessToken;
+      }
+      if (this.refreshToken) {
+        const refreshed = await this.refreshAccessToken();
+        return refreshed.access_token;
+      }
+    }
+    return this.getAppAccessToken();
+  }
+
+  /**
+   * Fetches and caches a client_credentials grant token. ML tokens are valid
+   * for 6h; refresh a minute early to avoid races.
+   */
+  private async getAppAccessToken(): Promise<string> {
+    if (
+      this.appAccessToken &&
+      this.appTokenExpiry &&
+      new Date() < new Date(this.appTokenExpiry.getTime() - 60_000)
+    ) {
+      return this.appAccessToken;
+    }
+    if (this.appTokenInflight) return this.appTokenInflight;
+
+    this.appTokenInflight = (async () => {
+      const tokenUrl = this.configService.get<string>('mercadolibre.tokenUrl');
+      const clientId = this.configService.get<string>('mercadolibre.clientId');
+      const clientSecret = this.configService.get<string>('mercadolibre.clientSecret');
+
+      if (!clientId || !clientSecret) {
+        throw new UnauthorizedException(
+          'ML_CLIENT_ID / ML_CLIENT_SECRET not configured — cannot fetch app token',
+        );
+      }
+
+      const params = new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: clientId,
+        client_secret: clientSecret,
+      });
+
+      try {
+        const response = await firstValueFrom(
+          this.httpService.post(tokenUrl, params.toString(), {
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              Accept: 'application/json',
+            },
+          }),
+        );
+        this.appAccessToken = response.data.access_token;
+        this.appTokenExpiry = new Date(Date.now() + response.data.expires_in * 1000);
+        this.logger.log('Fetched client_credentials app token');
+        return this.appAccessToken;
+      } catch (error) {
+        this.logger.error(
+          'Failed to fetch client_credentials token',
+          error.response?.data || error.message,
+        );
+        throw new UnauthorizedException('Failed to obtain app access token');
+      } finally {
+        this.appTokenInflight = null;
+      }
+    })();
+
+    return this.appTokenInflight;
   }
 
   /**

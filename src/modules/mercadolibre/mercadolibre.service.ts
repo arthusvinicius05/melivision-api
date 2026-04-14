@@ -5,6 +5,23 @@ import { firstValueFrom } from 'rxjs';
 import { AxiosRequestConfig } from 'axios';
 import { AuthService } from '../auth/auth.service';
 
+// Strip undefined/null/''/NaN so Nest's ValidationPipe coercion doesn't leak
+// sentinel values into ML query strings. With `enableImplicitConversion: true`,
+// a missing `@Query('offset') offset?: number` arrives as NaN — which axios
+// would serialize as `?offset=NaN`, and ML rejects it with a 400.
+function cleanParams(
+  params: Record<string, any> | undefined,
+): Record<string, any> | undefined {
+  if (!params) return undefined;
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === '') continue;
+    if (typeof v === 'number' && Number.isNaN(v)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 @Injectable()
 export class MercadolibreService {
   private readonly logger = new Logger(MercadolibreService.name);
@@ -23,34 +40,20 @@ export class MercadolibreService {
    * Automatically adds access token to requests
    */
   async request<T = any>(endpoint: string, options: AxiosRequestConfig = {}): Promise<T> {
+    const url = `${this.apiBase}${endpoint}`;
     try {
-      const url = `${this.apiBase}${endpoint}`;
-
-      // Try to get access token, but don't fail if not available
-      let accessToken: string | null = null;
-      try {
-        if (this.authService.isAuthenticated()) {
-          accessToken = await this.authService.getAccessToken();
-        }
-      } catch (error) {
-        // No token available, will make request without auth
-        this.logger.debug('No access token available, making unauthenticated request');
-      }
+      // ML now requires a Bearer header on virtually every endpoint (April 2025
+      // policy). Use the per-request user token if forwarded; otherwise fall
+      // back to a cached client_credentials app token.
+      const accessToken = await this.authService.getBearerToken();
 
       const config: AxiosRequestConfig = {
         ...options,
         headers: {
-          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
           ...options.headers,
         },
       };
-
-      // Add authorization header only if token is available
-      if (accessToken) {
-        config.headers['Authorization'] = `Bearer ${accessToken}`;
-      }
-
-      this.logger.debug(`Making request to: ${url}`);
 
       const response = await firstValueFrom(
         this.httpService.request<T>({
@@ -71,7 +74,7 @@ export class MercadolibreService {
   async get<T = any>(endpoint: string, params?: Record<string, any>): Promise<T> {
     return this.request<T>(endpoint, {
       method: 'GET',
-      params,
+      params: cleanParams(params),
     });
   }
 
