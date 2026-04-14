@@ -97,9 +97,6 @@ export class AuthController {
       }));
 
       res.redirect(`${frontendUrl}/#ml_auth=${authData}`);
-
-      res.setHeader('Content-Type', 'text/html');
-      res.send(html);
     } catch (err) {
       const errorData = encodeURIComponent(JSON.stringify({
         type: 'ML_AUTH_ERROR',
